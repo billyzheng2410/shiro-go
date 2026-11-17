@@ -4,6 +4,7 @@ import { resolve, dirname, basename, relative, isAbsolute, sep } from 'node:path
 import { fileURLToPath } from 'node:url';
 import { createGame, playMove, legalMoves } from './dist/engine.js';
 import { DEFAULT_RANK, getRank } from './dist/ranks.js';
+import { deadFromOwnership, countScore } from './dist/scoring.js';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const COLUMNS = 'ABCDEFGHJKLMNOPQRST';
@@ -37,7 +38,7 @@ export function gtpToIndex(move, size) {
   return row * size + column;
 }
 
-export function replayState(state) {
+export function replayState(state, allowFinished = false) {
   if (!state || typeof state !== 'object' || ![9, 13, 19].includes(state.size)) throw new EngineError('棋盘大小必须为 9、13 或 19。', 400);
   if (!Number.isFinite(state.komi) || Math.abs(state.komi) > 100 || !Number.isInteger(state.komi * 2)) throw new EngineError('贴目必须为 -100 到 100 范围内的整数或半目。', 400);
   if (![1, 2].includes(state.toPlay)) throw new EngineError('轮到的棋手无效。', 400);
@@ -56,7 +57,7 @@ export function replayState(state) {
     replay = played.state;
   }
   if (state.board.some((value, index) => value !== replay.board[index])) throw new EngineError('棋盘与棋谱不一致，请重新开始或恢复有效棋谱。', 400);
-  if (state.over || replay.over) throw new EngineError('对局已经结束，请悔棋或开始新对局。', 400);
+  if (!allowFinished && (state.over || replay.over)) throw new EngineError('对局已经结束，请悔棋或开始新对局。', 400);
   return replay;
 }
 
@@ -150,7 +151,7 @@ export function buildQuery(id, state, level = 'balanced', timeLimit, options = {
 
 export class KataGoEngine {
   constructor(options = {}) {
-    this.root = resolve(options.root ?? ROOT);
+    this.root = resolve(options.root ?? process.env.SHIRO_DATA_DIR ?? ROOT);
     this.selectionError = '';
     try { this.selection = readEngineSelection(this.root); }
     catch (error) { this.selection = null; this.selectionError = error.message; }
@@ -194,7 +195,7 @@ export class KataGoEngine {
       humanModel: humanAvailable ? basename(this.humanModelPath) : null,
       humanModelLoaded: this.ready && this.humanModelLoaded,
       ...(this.lastError ? { error: this.lastError } : {}),
-      ...(!installed ? { error: '尚未安装 KataGo 引擎或模型。请在项目目录运行 npm run setup，安装完成后重新启动。' } : {}),
+      ...(!installed ? { error: '本地引擎尚未就绪。请在上方安装面板完成安装；源码版也可运行 npm run setup。' } : {}),
       ...(this.selectionError ? { error: this.selectionError } : {}),
     };
   }
@@ -215,7 +216,7 @@ export class KataGoEngine {
     this.starting = true;
     const engineCwd = this.engineCwd;
     this.humanModelLoaded = existsSync(this.humanModelPath);
-    const args = ['analysis', '-config', relative(engineCwd, this.configPath), '-model', relative(engineCwd, this.modelPath), '-quit-without-waiting'];
+    const args = ['analysis', '-config', relative(engineCwd, this.configPath), '-model', relative(engineCwd, this.modelPath), '-override-config', 'reportAnalysisWinratesAs=SIDETOMOVE', '-quit-without-waiting'];
     if (this.humanModelLoaded) args.push('-human-model', relative(engineCwd, this.humanModelPath));
     const child = spawn(this.executable, args, {
       cwd: engineCwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
@@ -297,7 +298,9 @@ export class KataGoEngine {
         pv: selectedInfo?.pv?.length ? selectedInfo.pv : [selectedMove],
         analysisMove: best.move,
         analysisPv: best.pv ?? [],
-        ownership: result.ownership ?? null,
+        // reportAnalysisWinratesAs=SIDETOMOVE also applies to ownership.
+        ownership: Array.isArray(result.ownership) ? result.ownership.map(value => pending.player === 2 ? -value : value) : null,
+        ownershipPerspective: 'BLACK',
         candidates: rankedMoves.slice(0, 5).map(move => ({ index: gtpToIndex(move.move, pending.size), move: move.move, visits: move.visits, winrate: move.winrate, scoreLead: move.scoreLead, order: move.order })),
         engine: 'KataGo',
         purpose: selection.purpose,
@@ -344,6 +347,22 @@ export class KataGoEngine {
     const error = new EngineError('分析已取消。', 499);
     error.name = 'AbortError';
     this.finish(id, error);
+  }
+
+  async score(state, level = 'deep', timeLimit, { signal } = {}) {
+    const canonical = replayState(state, true);
+    let position = canonical;
+    if (canonical.over) {
+      // Analyze the same board just before the two ending passes. This avoids
+      // terminal search short-circuiting while preserving all actual stone moves.
+      position = createGame(canonical.size, canonical.komi);
+      for (const move of canonical.moves.slice(0, -2)) position = playMove(position, move.index).state;
+    }
+    const result = await this.analyze(position, level, timeLimit, { purpose: 'analyze', rank: 'max', signal });
+    const { dead, uncertainGroups } = deadFromOwnership(canonical, result.ownership);
+    const area = countScore(canonical, dead);
+    const estimatedBlackLead = result.player === 1 ? result.scoreLead : -result.scoreLead;
+    return { ...result, purpose: 'score', scoring: { ...area, suggestedDead: dead, uncertainGroups, estimatedBlackLead, requiresReview: !canonical.over || uncertainGroups > 0 || Math.abs(area.blackLead - estimatedBlackLead) > 2, method: 'AI ownership + Chinese area count', estimateOnly: true } };
   }
 
   analyze(state, level = 'balanced', timeLimit, options = {}) {

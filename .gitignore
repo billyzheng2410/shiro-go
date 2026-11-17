@@ -25,3 +25,5 @@ tmp/
 *.tar.gz
 .DS_Store
 Thumbs.db
+build/
+release/

@@ -5,6 +5,15 @@ That license does not replace the licenses of separately installed engines,
 model weights, GPU libraries, or their dependencies. This source repository
 does not include those executables, DLLs, model weights, or GPU caches.
 
+## Embedded Node.js runtime
+
+The Windows EXE embeds the official Node.js runtime and extracts its complete
+`Node-LICENSE.txt` beside the application resources. Node.js and bundled dependency
+notices remain applicable: [Node.js license](https://github.com/nodejs/node/blob/main/LICENSE).
+The source repository does not contain the runtime binary. The build uses
+`postject` to inject the application payload; build dependencies retain their
+package licenses and are not needed on the end user's computer.
+
 ## KataGo
 
 The local Go engine is [KataGo](https://github.com/lightvector/KataGo), by

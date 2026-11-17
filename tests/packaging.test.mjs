@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const ownGit = existsSync(join(root, '.git'));
-const generatedDirectories = new Set(['.git', 'node_modules', 'engine', 'engine-cuda', 'engine-tensorrt', 'runtime', 'benchmarks', 'verification', 'tmp', 'screenshots']);
+const generatedDirectories = new Set(['.git', 'node_modules', 'engine', 'engine-cuda', 'engine-tensorrt', 'runtime', 'benchmarks', 'verification', 'tmp', 'screenshots', 'build', 'release', 'test-output']);
 
 function filesystemSources(directory = root) {
   const files = [];
@@ -39,7 +39,7 @@ const sourceAllowlist = /^(?:(?:README(?:\.[a-zA-Z-]+)?|THIRD_PARTY_NOTICES|CONT
 test('public source contains only the application allowlist, without runtimes, games or raw logs', () => {
   for (const required of ['server.mjs', 'katago.mjs', 'dist/index.html', 'dist/app.js', 'THIRD_PARTY_NOTICES.md']) assert.ok(files.includes(required), `Missing application source: ${required}`);
   for (const file of files) {
-    const rootModule = /^(?:server|katago)\.mjs$/.test(file);
+    const rootModule = /^(?:server|katago|setup-manager)\.mjs$/.test(file) || /^desktop\/[\w-]+\.cjs$/.test(file);
     assert.ok(rootModule || sourceAllowlist.test(file) || reviewedImages.has(file) || reviewedLicenseTexts.has(file), `Unreviewed publication path: ${file}`);
     assert.ok(statSync(join(root, file)).size < 2 * 1024 * 1024, `Source file unexpectedly exceeds 2 MiB: ${file}`);
     assert.doesNotMatch(file, /(?:^|\/)(?:engine(?:-[^/]+)?|runtime|benchmarks|verification|screenshots|node_modules)(?:\/|$)/i);
@@ -73,7 +73,7 @@ test('frontend only calls local API paths and has no remote scripts, fonts or st
   const css = readFileSync(join(root, 'dist', 'style.css'), 'utf8');
   const targets = [...app.matchAll(/\bfetch\(\s*(['"])(.*?)\1/g)].map(match => match[2]);
   assert.ok(targets.length > 0);
-  for (const target of targets) assert.match(target, /^\/api\/(?:status|analyze)$/);
+  for (const target of targets) assert.match(target, /^\/api\/(?:status|analyze|score)$/);
   assert.doesNotMatch(html, /<(?:script|link)\b[^>]*(?:src|href)\s*=\s*['"](?:https?:)?\/\//i);
   assert.doesNotMatch(css, /@import\b|url\(\s*['"]?(?:https?:)?\/\//i);
 });

@@ -28,3 +28,26 @@ jobs:
           package-manager-cache: false
       - name: Test rules, local server and mocked engine protocol
         run: npm test
+  executable:
+    name: Windows standalone EXE
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run build:exe
+      - name: Verify embedded runtime without external Node on PATH
+        shell: pwsh
+        run: |
+          $executable = (Get-ChildItem -LiteralPath release -Filter '*.exe').FullName
+          $env:PATH = Join-Path $env:SystemRoot 'System32'
+          $process = Start-Process -FilePath $executable -ArgumentList '--self-test', '--data-dir=./test-output/ci' -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput self-test.json -RedirectStandardError self-test.err
+          if ($process.ExitCode -ne 0) { throw (Get-Content self-test.err -Raw) }
+          $result = Get-Content self-test.json -Raw | ConvertFrom-Json
+          if (-not $result.sea -or -not $result.setupAvailable) { throw 'Missing embedded runtime or installer.' }

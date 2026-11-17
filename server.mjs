@@ -4,6 +4,7 @@ import { resolve, dirname, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { KataGoEngine, EngineError, validateState } from './katago.mjs';
+import { SetupManager } from './setup-manager.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
@@ -71,7 +72,15 @@ async function readJson(request) {
 }
 
 export function createServer(options = {}) {
-  const engine = options.engine ?? new KataGoEngine();
+  const dataRoot = resolve(options.dataRoot ?? process.env.SHIRO_DATA_DIR ?? ROOT);
+  let engine = options.engine ?? new KataGoEngine({ root: dataRoot });
+  const setup = options.setup ?? new SetupManager({ appRoot: ROOT, dataRoot, desktop: Boolean(options.desktop),
+    beforeStart: () => {
+      if (engine.pending?.size) throw new EngineError('Please stop the current search before installation.', 409);
+      engine.close();
+    },
+    onComplete: () => { engine = new KataGoEngine({ root: dataRoot }); },
+  });
   const staticRoot = resolve(options.staticRoot ?? resolve(ROOT, 'dist'));
   const port = options.port ?? Number(process.env.PORT || 8765);
   const ephemeral = options.port === 0;
@@ -88,9 +97,35 @@ export function createServer(options = {}) {
     try {
       const url = new URL(request.url, `http://127.0.0.1:${boundPort}`);
       if (url.pathname === '/api/status' && request.method === 'GET') {
-        sendJson(response, 200, { ...engine.status(), app: 'shiro-go' }); return;
+        sendJson(response, 200, { ...engine.status(), app: 'shiro-go', desktop: Boolean(options.desktop), setupRunning: setup.status().running }); return;
+      }
+      if (url.pathname === '/api/setup/status' && request.method === 'GET') { sendJson(response, 200, setup.status()); return; }
+      if (url.pathname === '/api/setup/plan' && request.method === 'GET') {
+        sendJson(response, 200, await setup.plan({ backend: url.searchParams.get('backend') || 'auto', runtimeDir: url.searchParams.get('runtimeDir') || '' })); return;
+      }
+      if (url.pathname === '/api/setup/start' && request.method === 'POST') {
+        if (!(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new EngineError('Use application/json for installation.', 415);
+        sendJson(response, 202, await setup.start(await readJson(request))); return;
+      }
+      if (url.pathname === '/api/desktop/quit' && request.method === 'POST' && options.desktop) {
+        if (!(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new EngineError('Use application/json.', 415);
+        await readJson(request); sendJson(response, 200, { ok: true });
+        setTimeout(() => options.onQuit?.(), 100); return;
+      }
+      if (url.pathname === '/api/score' && request.method === 'POST') {
+        if (setup.status().running) throw new EngineError('Installation is running. Please wait.', 409);
+        if (!(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new EngineError('Use application/json.', 415);
+        const body = await readJson(request);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new EngineError('Invalid scoring request.', 400);
+        const controller = new AbortController();
+        const onDisconnect = () => { if (!response.writableEnded) controller.abort(); };
+        response.on('close', onDisconnect);
+        try { const result = await engine.score(body.state, body.level ?? 'deep', body.timeLimit, { signal: controller.signal }); if (!response.destroyed) sendJson(response, 200, result); }
+        finally { response.off('close', onDisconnect); }
+        return;
       }
       if (url.pathname === '/api/analyze' && request.method === 'POST') {
+        if (setup.status().running) throw new EngineError('Installation is running. Please wait.', 409);
         if (!(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new EngineError('请以 application/json 发送分析请求。', 415);
         const body = await readJson(request);
         if (!body || typeof body !== 'object' || Array.isArray(body)) throw new EngineError('分析请求必须为 JSON 对象。', 400);
@@ -129,8 +164,8 @@ export function createServer(options = {}) {
   });
   server.requestTimeout = 240000;
   server.headersTimeout = 15000;
-  server.on('close', () => engine.close());
-  return { server, engine, port };
+  server.on('close', () => { setup.close(); engine.close(); });
+  return { server, get engine() { return engine; }, setup, port };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

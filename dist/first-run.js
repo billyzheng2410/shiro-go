@@ -1,0 +1,53 @@
+const $ = id => document.getElementById(id);
+
+export function initSetupUI(refreshStatus, toast) {
+  let active = false, lastPhase = '';
+  const body = () => ({ backend: $('setup-backend').value, runtimeDir: $('setup-directory').value.trim() });
+  const request = async (url, options) => {
+    const response = await fetch(url, options); const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Installation request failed.');
+    return data;
+  };
+  const showPlan = async () => {
+    $('setup-plan').textContent = '正在检查硬件与磁盘空间…';
+    try {
+      const plan = await request('/api/setup/plan?' + new URLSearchParams(body()));
+      $('setup-plan').textContent = `${plan.backend.toUpperCase()} · ${(plan.downloadBytes / 1048576).toFixed(1)} MiB download\n${plan.runtimeDir}\n${[...plan.explanations, ...plan.errors].join('\n')}`;
+      $('setup-start').disabled = active || plan.errors.length > 0;
+    } catch (error) { $('setup-plan').textContent = error.message; $('setup-start').disabled = true; }
+  };
+  const poll = async () => {
+    try {
+      const status = await request('/api/setup/status');
+      active = status.running;
+      $('setup-start').disabled = active;
+      $('setup-backend').disabled = active; $('setup-directory').disabled = active; $('setup-check').disabled = active;
+      $('setup-progress').textContent = active ? '正在安装，请稍候…' : status.phase === 'completed' ? '安装完成，可以开始对弈。' : status.phase === 'failed' ? '安装失败，请查看日志或选择 CPU 重试。' : '安装尚未开始。';
+      $('setup-log').textContent = status.log + (status.error ? `\n${status.error}` : '');
+      if (status.phase !== lastPhase && ['completed', 'failed'].includes(status.phase)) await refreshStatus();
+      lastPhase = status.phase;
+    } catch { /* The app may have been closed by the user. */ }
+    if (active) setTimeout(poll, 1000);
+  };
+  $('setup-check').addEventListener('click', showPlan);
+  $('setup-backend').addEventListener('change', showPlan);
+  $('setup-directory').addEventListener('change', showPlan);
+  $('setup-start').addEventListener('click', async () => {
+    $('setup-start').disabled = true;
+    try {
+      await request('/api/setup/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body()) });
+      active = true; poll();
+    } catch (error) { toast(error.message); $('setup-start').disabled = false; await poll(); }
+  });
+  $('quit-app').addEventListener('click', async () => {
+    try { await request('/api/desktop/quit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); toast('应用已关闭，可以关闭此页面。'); }
+    catch (error) { toast(error.message); }
+  });
+  return {
+    update(status) {
+      $('quit-app').hidden = !status.desktop;
+      $('setup-panel').hidden = status.installed && !status.error && !status.setupRunning;
+      if (!$('setup-panel').hidden && !lastPhase) { lastPhase = 'initial'; showPlan(); poll(); }
+    },
+  };
+}

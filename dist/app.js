@@ -1,4 +1,7 @@
-import { createGame, playMove, scoreGame, BLACK, WHITE } from './engine.js';
+import { createGame, playMove, BLACK, WHITE } from './engine.js';
+import { initLanguage, getLanguage, translateText } from './i18n.js';
+import { initSetupUI } from './first-run.js';
+import { showScore } from './score-ui.js';
 import { RANKS, DEFAULT_RANK, getRank } from './ranks.js';
 
 const $ = id => document.getElementById(id);
@@ -23,6 +26,8 @@ let resigned = false;
 let newSize = 19;
 let newColor = BLACK;
 let toastTimer;
+let autoScorePending = false;
+const setupUI = initSetupUI(getStatus, toast);
 
 function rankLabel(id = opponentRank) { return getRank(id)?.label || '最强 · 不限段位'; }
 
@@ -189,6 +194,7 @@ function render() {
   $('pass-button').disabled = !canPlay();
   $('hint-button').disabled = busy || state.over || resigned;
   $('hint-button').innerHTML = `<span>✧</span> ${mode === 'analysis' ? '分析局面' : state.toPlay !== human && !state.over && !resigned ? '继续落子' : 'AI 提示'}`;
+  $('score-button').disabled = busy || !state.moves.length;
   $('resign-button').disabled = busy || state.over || resigned || mode === 'analysis';
   $('opponent-rank').value = opponentRank;
   $('opponent-rank').disabled = busy || mode === 'analysis';
@@ -249,6 +255,7 @@ async function getStatus() {
     const response = await fetch('/api/status');
     if (!response.ok) throw new Error('无法连接本地围棋服务。');
     engineStatus = await response.json();
+    setupUI.update(engineStatus);
     const good = engineStatus.installed && !engineStatus.error;
     $('engine-state').classList.toggle('error', !good);
     $('engine-state').innerHTML = `<i></i> ${!good ? '未就绪' : engineStatus.ready ? '已连接' : engineStatus.starting ? '启动中' : '已安装'}`;
@@ -315,7 +322,7 @@ async function requestAI(play = false) {
       getStatus();
     }
   } finally {
-    if (generation === token) { busy = false; render(); }
+    if (generation === token) { busy = false; render(); if (autoScorePending) { autoScorePending = false; requestScore(); } }
   }
 }
 
@@ -352,13 +359,28 @@ function info(title, paragraphs) {
 }
 
 function showEnd() {
-  const score = scoreGame(state);
-  const winner = score.black > score.white ? '黑棋' : score.white > score.black ? '白棋' : '双方';
-  info('双方停一手', [
-    `盘面数子：黑棋 ${score.black.toFixed(1)}，白棋 ${score.white.toFixed(1)}（含贴目 ${state.komi}）。${score.black === score.white ? '盘面持平。' : `${winner}盘面多 ${Math.abs(score.black - score.white).toFixed(1)} 目。`}`,
-    '这是按当前棋盘计算的面积，未自动判定死子。如果盘面仍有未提走的死子或未定型区域，可悔棋继续收完。KataGo 的中盘胜率和领先目数均为估计。',
-    '你可以导出 SGF 棋谱保存这局棋，或开始新的对局。',
-  ]);
+  if (busy) autoScorePending = true;
+  else requestScore();
+}
+
+async function requestScore() {
+  if (busy || !state.moves.length) return;
+  const token = generation;
+  busy = true; render();
+  requestController = new AbortController();
+  toast('正在分析死活并数子…');
+  try {
+    const response = await fetch('/api/score', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: requestController.signal,
+      body: JSON.stringify({ state, level: $('strength').value }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'AI 数子失败，请重试。');
+    if (generation !== token) return;
+    if (!result.scoring || !Array.isArray(result.scoring.suggestedDead)) throw new Error('Invalid scoring response.');
+    showScore(state, result);
+  } catch (error) { if (error.name !== 'AbortError' && generation === token) toast(error.message); }
+  finally { if (generation === token) { busy = false; render(); } }
 }
 
 function exportSgf() {
@@ -370,14 +392,14 @@ function exportSgf() {
   const localDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   const result = resigned ? `RE[${human === BLACK ? 'W' : 'B'}+R]` : '';
   const profileNote = mode === 'analysis' ? '自由分析棋谱。' : `导出时的对手档位：${rankLabel()}。中途调整档位仅影响后续落子；段级位为 KGS 近似棋风，不是认证段位。`;
-  let text = `(;GM[1]FF[4]CA[UTF-8]AP[ShiroGo:1.2]SZ[${state.size}]KM[${state.komi}]RU[Chinese]DT[${localDate}]PB[${escape(blackName)}]PW[${escape(whiteName)}]C[${escape(profileNote)}]${result}`;
+  let text = `(;GM[1]FF[4]CA[UTF-8]AP[ShiroGo:1.3]SZ[${state.size}]KM[${state.komi}]RU[Chinese]DT[${localDate}]PB[${escape(blackName)}]PW[${escape(whiteName)}]C[${escape(translateText(profileNote, getLanguage()))}]${result}`;
   for (const move of state.moves) {
     const point = move.index < 0 ? '' : String.fromCharCode(97 + move.index % state.size) + String.fromCharCode(97 + Math.floor(move.index / state.size));
     text += `;${move.player === BLACK ? 'B' : 'W'}[${point}]`;
   }
   text += ')';
   const url = URL.createObjectURL(new Blob([text], { type: 'application/x-go-sgf;charset=utf-8' }));
-  const link = document.createElement('a'); link.href = url; link.download = `弈间-${localDate}-${state.size}路.sgf`; link.click();
+  const link = document.createElement('a'); link.href = url; link.download = getLanguage() === 'en' ? `Shiro-Go-${localDate}-${state.size}x${state.size}.sgf` : `弈间-${localDate}-${state.size}路.sgf`; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 3000);
   toast('棋谱已导出为 SGF 文件。');
 }
@@ -420,11 +442,12 @@ new ResizeObserver(renderBoard).observe(canvas);
 $('undo-button').addEventListener('click', undo);
 $('pass-button').addEventListener('click', () => handleMove(-1));
 $('hint-button').addEventListener('click', () => requestAI(mode === 'play' && state.toPlay !== human));
+$('score-button').addEventListener('click', requestScore);
 $('export-button').addEventListener('click', exportSgf);
 $('strength').addEventListener('change', () => { save(); render(); });
 $('stop-thinking').addEventListener('click', () => {
   if (!busy) return;
-  generation++; requestController?.abort(); busy = false;
+  generation++; requestController?.abort(); busy = false; autoScorePending = false;
   render(); toast('已停止思考，棋局已保留。');
 });
 $('opponent-rank').addEventListener('change', () => {
@@ -449,6 +472,7 @@ $('help-button').addEventListener('click', () => info('关于弈间', [
   'AI 提示和棋局分析始终使用全力模型，不受对手段位限制；分析时间由“分析用时”控制。',
   '点击棋盘交叉点落子；支持提子、禁自杀、全局同形和双方停一手终局。使用中国面积规则，白棋默认贴 7.5 目。键盘可用方向键选择位置、回车落子。',
   'AI 提示会显示候选点、胜率、预计领先目数与参考变化。棋局分析模式可为双方落子，再请求 KataGo 分析；这些数据都是估计。',
+  'AI 数子使用全力 KataGo 分析死活，按中国面积规则计算。可点击棋块修正死活；未定型局面、双活和劫争需要人工复核。双方停一手后自动数子。',
   '棋局自动保存在此浏览器，可导出标准 SGF。关闭「启动围棋」窗口会停止本地服务。所有对弈计算均在本机进行。',
 ]));
 $('close-info').addEventListener('click', () => $('info-dialog').close());
@@ -467,7 +491,7 @@ $('new-form').addEventListener('submit', event => {
   const komi = Number($('komi-input').value);
   if (!Number.isFinite(komi) || komi < -50 || komi > 50 || !Number.isInteger(komi * 2)) { toast('贴目须为 -50 到 50 之间的整数或半目。'); return; }
   if (!getRank($('new-rank').value)) { toast('请选择有效的对手水平。'); return; }
-  generation++; requestController?.abort(); busy = false;
+  generation++; requestController?.abort(); busy = false; autoScorePending = false;
   opponentRank = $('new-rank').value;
   state = createGame(newSize, komi); human = newColor; resigned = false; evaluation = null; evaluations = []; suggestion = -2; hover = -1; focusPoint = -1;
   $('tip-title').textContent = '留一点空间，给思考。';
@@ -476,6 +500,7 @@ $('new-form').addEventListener('submit', event => {
 });
 
 restore(); render();
+initLanguage();
 await getStatus();
 if (mode === 'play' && state.toPlay !== human && !state.over && !resigned) requestAI(true);
 setInterval(() => { if (busy || engineStatus?.starting) getStatus(); }, 4000);

@@ -7,7 +7,7 @@ import { resolve, join, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createServer, reopenExistingServer } from '../server.mjs';
-import { createGame } from '../dist/engine.js';
+import { createGame, playMove } from '../dist/engine.js';
 
 function removeOwnedFixture(directory) {
   const actual = resolve(directory);
@@ -56,6 +56,20 @@ function request(port, path, { method = 'GET', headers = {}, body } = {}) {
   });
 }
 
+test('scoring API accepts finished games and passes its search settings and signal', async t => {
+  let observed;
+  const engine = mockEngine({ score: async (state, level, timeLimit, options) => {
+    observed = { state, level, timeLimit, signal: options.signal };
+    return { purpose: 'score', scoring: { black: 0, white: 7.5, suggestedDead: [] } };
+  } });
+  const { port } = await fixture(t, engine);
+  const ended = playMove(playMove(createGame(9), -1).state, -1).state;
+  const response = await request(port, '/api/score', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ state: ended, level: 'fast', timeLimit: .1 }) });
+  assert.equal(response.status, 200); assert.equal(JSON.parse(response.body).purpose, 'score');
+  assert.equal(observed.state.over, true); assert.equal(observed.level, 'fast'); assert.equal(observed.signal.aborted, false);
+  assert.equal((await request(port, '/api/score', { method: 'POST', body: '{}' })).status, 415);
+});
+
 test('an engine-free checkout serves local HTML, HEAD and actionable setup status without spawning a model', async t => {
   const { port } = await fixture(t);
   const page = await request(port, '/');
@@ -69,7 +83,7 @@ test('an engine-free checkout serves local HTML, HEAD and actionable setup statu
   assert.equal(head.headers['content-length'], page.headers['content-length']);
   const status = await request(port, '/api/status');
   assert.equal(status.status, 200);
-  assert.deepEqual(JSON.parse(status.body), { ...mockEngine().status(), app: 'shiro-go' });
+  assert.deepEqual(JSON.parse(status.body), { ...mockEngine().status(), app: 'shiro-go', desktop: false, setupRunning: false });
 });
 
 test('the local HTTP boundary rejects foreign hosts/origins and traversal paths', async t => {

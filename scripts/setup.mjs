@@ -12,7 +12,9 @@ import {
 } from './setup-core.mjs';
 
 const run = promisify(execFile);
+const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const root = fileURLToPath(new URL('../', import.meta.url));
+const dataRoot = path.resolve(process.env.SHIRO_DATA_DIR || root);
 const help = `Shiro Go local engine setup (Windows x64 / Node.js 20+)
 
   node scripts/setup.mjs
@@ -65,7 +67,7 @@ try { foreach($entry in $zip.Entries) {
   $target=Join-Path $folder $leaf; $source=$entry.Open();
   try { $output=[System.IO.File]::Open($target,[System.IO.FileMode]::Create); try {$source.CopyTo($output)} finally {$output.Dispose()} } finally {$source.Dispose()}
 } } finally {$zip.Dispose()}`;
-  await run('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
+  await run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
     windowsHide: true, timeout: 300_000, maxBuffer: 1024 * 1024,
     env: { ...process.env, SHIRO_SETUP_ARCHIVE: archive, SHIRO_SETUP_TARGET: destination, SHIRO_SETUP_PACKAGE: name },
   });
@@ -127,7 +129,21 @@ async function install(plan) {
   const lockPath = path.join(plan.runtimeDir, '.setup.lock');
   let lock;
   try { lock = await open(lockPath, 'wx'); }
-  catch (error) { if (error.code === 'EEXIST') throw new Error('Another setup is running for this runtime. If an earlier setup crashed, close it and remove only this runtime\'s .setup.lock file.'); throw error; }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    // A terminated desktop installer can leave a lock. Recover only a valid
+    // lock whose owner has definitely exited; permission errors count as live.
+    const previous = await readFile(lockPath, 'utf8');
+    let owner;
+    try { owner = JSON.parse(previous).pid; } catch {}
+    let exited = false;
+    if (Number.isInteger(owner) && owner > 0) {
+      try { process.kill(owner, 0); } catch (probe) { exited = probe.code === 'ESRCH'; }
+    }
+    if (!exited || await readFile(lockPath, 'utf8') !== previous) throw new Error('Another setup is running for this runtime, or its lock could not be safely recovered.');
+    await unlink(lockPath);
+    lock = await open(lockPath, 'wx');
+  }
   await lock.writeFile(JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
   const backendDir = path.dirname(plan.paths.executable);
   const stage = path.join(plan.runtimeDir, `.staging-${plan.backend}-${randomUUID()}`);
@@ -161,7 +177,7 @@ async function install(plan) {
     }
     const licenseTarget = path.join(plan.runtimeDir, 'licenses'); await mkdir(licenseTarget, { recursive: true });
     for (const name of await readdir(path.join(root, 'scripts', 'licenses'))) await copyFile(path.join(root, 'scripts', 'licenses', name), path.join(licenseTarget, name));
-    await atomicWriteJson(plan.selectorPath, selectorForPlan(plan, root));
+    await atomicWriteJson(plan.selectorPath, selectorForPlan(plan, dataRoot));
     console.log(`Local engine ready: ${verification.result.move}; HumanSL policy verified. Run npm start.`);
   } finally {
     if (staged) await removeOwnStage(stage, plan.runtimeDir).catch(error => console.error(`Setup staging cleanup: ${error.message}`));
@@ -169,17 +185,24 @@ async function install(plan) {
   }
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2));
-  if (options.help) { console.log(help); return; }
-  const runtimeDir = path.resolve(options.runtimeDir ?? path.join(root, 'engine'));
+export async function inspectSetup(args = process.argv.slice(2), installRoot = dataRoot) {
+  const options = parseArgs(args);
+  const runtimeDir = path.resolve(options.runtimeDir ?? path.join(installRoot, 'engine'));
   const [gpus, freeBytes, reusable] = await Promise.all([
     detectNvidia(), availableDiskBytes(runtimeDir).catch(() => null),
     Promise.all(['cpu', 'cuda'].map(async backend => await reusableInstallation(runtimeDir, backend) ? backend : null)),
   ]);
-  const plan = buildPlan({ options, root, platform: process.platform, arch: process.arch, logicalCpuThreads: os.cpus().length, gpus, freeBytes, installedBackends: reusable.filter(Boolean) });
+  return buildPlan({ options, root: installRoot, platform: process.platform, arch: process.arch, logicalCpuThreads: os.cpus().length, gpus, freeBytes, installedBackends: reusable.filter(Boolean) });
+}
+
+export async function runSetup(args = process.argv.slice(2)) {
+  const options = parseArgs(args);
+  if (options.help) { console.log(help); return; }
+  const plan = await inspectSetup(args);
   if (options.plan) { console.log(JSON.stringify(plan, null, 2)); return; }
   await install(plan);
 }
 
-main().catch(error => { console.error(`Setup failed: ${error.message}`); process.exitCode = 1; });
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runSetup().catch(error => { console.error(`Setup failed: ${error.message}`); process.exitCode = 1; });
+}
