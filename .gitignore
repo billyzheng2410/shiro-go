@@ -1,0 +1,27 @@
+# Downloaded inference engines, local hardware configuration and model weights.
+engine/
+engine-*/
+.runtime/
+models/
+node_modules/
+logs/
+verification/
+test-output/
+tmp/
+.env
+.env.*
+*.log
+*.pid
+*.bin
+*.bin.gz
+*.dll
+*.exe
+*.onnx
+*.plan
+*.cache
+*.cltune
+*.zip
+*.whl
+*.tar.gz
+.DS_Store
+Thumbs.db
