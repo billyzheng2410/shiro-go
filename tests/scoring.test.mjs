@@ -1,8 +1,73 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createGame, playMove } from '../dist/engine.js';
+import { createGame, playMove, serializePosition } from '../dist/engine.js';
 import { countScore, deadFromOwnership, groupMembers } from '../dist/scoring.js';
-import { KataGoEngine } from '../katago.mjs';
+import { KataGoEngine, replayState } from '../katago.mjs';
+import { showScore } from '../dist/score-ui.js';
+
+test('long legal games fit the scoring request limit after dropping redundant board history', () => {
+  let state = createGame(19);
+  let seed = 4;
+  function nextRandom() {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed;
+  }
+  // Fixed legal replay that previously exceeded the server's body limit.
+  while (state.moves.length < 1222) {
+    const turnRandom = nextRandom();
+    if (!state.passes && (turnRandom >>> 12) % 4 < 3) {
+      state = playMove(state, -1).state;
+      continue;
+    }
+    const empty = state.board.flatMap((stone, index) => stone ? [] : [index]);
+    let legal;
+    while (empty.length) {
+      const candidate = (nextRandom() >>> 8) % empty.length;
+      legal = playMove(state, empty[candidate]);
+      if (legal.ok) break;
+      empty[candidate] = empty.at(-1);
+      empty.pop();
+    }
+    assert.ok(legal?.ok);
+    state = legal.state;
+  }
+  while (!state.over) state = playMove(state, -1).state;
+  const requestBytes = position => Buffer.byteLength(JSON.stringify({ state: position, level: 'fast' }));
+  const compact = serializePosition(state);
+  assert.ok(requestBytes(state) > 512 * 1024);
+  assert.ok(requestBytes(compact) < 512 * 1024);
+  assert.deepEqual(replayState(compact, true), state);
+});
+
+test('the manual scoring panel can mark, count and clear a dead group without an AI result', t => {
+  const originalDocument = globalThis.document;
+  t.after(() => { globalThis.document = originalDocument; });
+  const element = () => ({
+    style: { setProperty() {} },
+    setAttribute() {},
+    replaceChildren(...children) { this.children = children; },
+    addEventListener(_name, handler) { this.click = handler; },
+    showModal() { this.open = true; },
+  });
+  const elements = new Map();
+  const get = id => {
+    if (!elements.has(id)) elements.set(id, element());
+    return elements.get(id);
+  };
+  globalThis.document = { getElementById: get, createElement: element };
+  const state = createGame(9);
+  state.board[0] = state.board[1] = 1;
+  state.board[80] = 2;
+  showScore(state);
+  assert.equal(get('score-dialog').open, true);
+  assert.equal(get('score-title').textContent, '手动数子');
+  get('score-board').children[1].click();
+  assert.match(get('score-dead').textContent, /黑 2，白 0/);
+  assert.equal(get('score-black').textContent, '0.0');
+  get('score-reset').onclick();
+  assert.match(get('score-dead').textContent, /黑 0，白 0/);
+  assert.deepEqual(state.board.slice(0, 2), [1, 1]);
+});
 
 test('dead-stone judgment requires opponent ownership for the entire connected group', () => {
   const state = createGame(9); state.board[0] = state.board[1] = 1; state.board[80] = 2;

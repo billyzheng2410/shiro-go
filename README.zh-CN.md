@@ -12,7 +12,7 @@ own computer. No account, API key, paid inference API, or remote AI server is re
 
 ## Windows EXE（无需安装 Node.js）
 
-1. 打开 [Releases 下载页面](https://github.com/billyzheng2410/shiro-go/releases/latest)，下载 **Shiro-Go-1.3.0-windows-x64.exe**。
+1. 打开 [Releases 下载页面](https://github.com/billyzheng2410/shiro-go/releases/latest)，下载 **Shiro-Go-1.3.1-windows-x64.exe**。
 2. 双击 EXE，浏览器会自动打开本机围棋页面。
 3. 首次运行在页面选择计算方式，点击「安装并开始」。引擎、模型和运行库由程序自动下载、校验；以后可离线使用。
 

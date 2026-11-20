@@ -1,9 +1,10 @@
 import { countScore, groupMembers } from './scoring.js';
 
-export function showScore(state, result) {
+export function showScore(state, result = null) {
   const dialog = document.getElementById('score-dialog');
   const board = document.getElementById('score-board');
-  const original = new Set(result.scoring.suggestedDead);
+  const scoring = result?.scoring;
+  const original = new Set(scoring?.suggestedDead ?? []);
   let dead = new Set(original);
   const render = () => {
     const score = countScore(state, [...dead]);
@@ -27,12 +28,19 @@ export function showScore(state, result) {
       return point;
     }));
   };
-  const lead = result.scoring.estimatedBlackLead;
-  document.getElementById('score-estimate').textContent = `AI 预计：${lead >= 0 ? '黑棋' : '白棋'}领先 ${Math.abs(lead).toFixed(1)} 目`;
-  document.getElementById('score-warning').textContent = result.scoring.requiresReview
+  document.getElementById('score-title').textContent = scoring ? 'AI 自动数子' : '手动数子';
+  const lead = scoring?.estimatedBlackLead;
+  document.getElementById('score-estimate').textContent = scoring
+    ? `AI 预计：${lead >= 0 ? '黑棋' : '白棋'}领先 ${Math.abs(lead).toFixed(1)} 目`
+    : 'AI 死活分析暂不可用。';
+  document.getElementById('score-warning').textContent = !scoring
+    ? '当前按棋盘面积计数。请手动标记死子，并核对未定型区域。'
+    : scoring.requiresReview
     ? '局面仍可能有未定型区域。AI 预计领先与盘面数子可能不同；请核对死活并收完单官，不能直接作为正式终局裁定。'
     : 'AI 已标记可能的死子。请核对双活、劫争与死活；数子结果需要双方确认。';
-  document.getElementById('score-reset').onclick = () => { dead = new Set(original); render(); };
+  const reset = document.getElementById('score-reset');
+  reset.textContent = scoring ? '恢复 AI 判断' : '清除死子标记';
+  reset.onclick = () => { dead = new Set(original); render(); };
   document.getElementById('close-score').onclick = () => dialog.close();
   render();
   if (!dialog.open) dialog.showModal();

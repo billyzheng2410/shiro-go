@@ -73,7 +73,7 @@ test('frontend only calls local API paths and has no remote scripts, fonts or st
   const css = readFileSync(join(root, 'dist', 'style.css'), 'utf8');
   const targets = [...app.matchAll(/\bfetch\(\s*(['"])(.*?)\1/g)].map(match => match[2]);
   assert.ok(targets.length > 0);
-  for (const target of targets) assert.match(target, /^\/api\/(?:status|analyze|score)$/);
+  for (const target of targets) assert.match(target, /^\/api\/(?:status|analyze|score|desktop\/save)$/);
   assert.doesNotMatch(html, /<(?:script|link)\b[^>]*(?:src|href)\s*=\s*['"](?:https?:)?\/\//i);
   assert.doesNotMatch(css, /@import\b|url\(\s*['"]?(?:https?:)?\/\//i);
 });

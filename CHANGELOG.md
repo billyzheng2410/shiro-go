@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.1
+
+- Start the analysis deadline when KataGo receives the request and cancel only the timed-out search.
+- Remember the desktop game and language across local port changes. Import a legacy browser save on the original address.
+- Reuse one Windows process even when the app opens twice at the same time.
+- Keep setup checks in sync with the selected backend and directory.
+- Open manual scoring when AI analysis is unavailable and send only the position fields needed for scoring long games.
+
 ## 1.3.0
 
 - Windows x64 standalone EXE with an embedded Node runtime, browser-based first-run setup, persistent local data, port selection, and app shutdown.

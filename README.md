@@ -10,7 +10,7 @@ No account, API key, or paid inference service is needed.
 
 ## Download and run on Windows
 
-1. Download **Shiro-Go-1.3.0-windows-x64.exe** from [Releases](https://github.com/billyzheng2410/shiro-go/releases/latest).
+1. Download **Shiro-Go-1.3.1-windows-x64.exe** from [Releases](https://github.com/billyzheng2410/shiro-go/releases/latest).
 2. Double-click it. Your browser opens the local Go interface.
 3. On first launch, choose a compute backend and click **Install and start**.
    The app downloads and verifies KataGo, models, and any needed GPU libraries.

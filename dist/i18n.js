@@ -69,6 +69,11 @@ export const COPY = {
   '安装尚未开始。': 'Installation has not started.', '正在检查硬件与磁盘空间…': 'Checking hardware and free disk space…',
   '应用已关闭，可以关闭此页面。': 'The application has stopped. You can close this page.',
   '分析局面': 'Analyze position', 'AI 数子': 'AI score', 'AI 自动数子': 'AI scoring',
+  '手动数子': 'Manual scoring', 'AI 死活分析暂不可用。': 'AI life and death analysis is unavailable.',
+  '当前按棋盘面积计数。请手动标记死子，并核对未定型区域。': 'The count uses the current board area. Mark dead groups and review unsettled areas.',
+  '清除死子标记': 'Clear dead-stone marks',
+  '无法读取本机存档。': 'Could not read the desktop save.',
+  '本机存档写入失败。': 'Could not write the desktop save.',
   '在每一手，读懂棋局。': 'Understand the position, one move at a time.',
   '自由落子，随时请 KataGo 看看局面的可能。': 'Play either side and explore the position with KataGo.',
   '本地引擎尚未就绪。请在上方安装面板完成安装；源码版也可运行 npm run setup。': 'Set up the local engine using the installation panel above. Source users can also run npm run setup.',
@@ -118,8 +123,8 @@ export function translateText(value, language = 'en') {
 
 let language = 'zh';
 export function getLanguage() { return language; }
-export function initLanguage() {
-  try { language = localStorage.getItem('shiro-go-language') || (navigator.language.startsWith('zh') ? 'zh' : 'en'); } catch { language = 'zh'; }
+export function initLanguage({ initialLanguage, onChange } = {}) {
+  try { language = initialLanguage || localStorage.getItem('shiro-go-language') || (navigator.language.startsWith('zh') ? 'zh' : 'en'); } catch { language = initialLanguage || 'zh'; }
   const texts = new WeakMap(), attributes = new WeakMap();
   const bind = (node, map, read, write) => {
     const current = read(); let record = map.get(node);
@@ -153,6 +158,7 @@ export function initLanguage() {
   document.getElementById('language')?.addEventListener('change', event => {
     language = event.target.value === 'en' ? 'en' : 'zh';
     try { localStorage.setItem('shiro-go-language', language); } catch {}
+    onChange?.(language);
     localize();
   });
   localize();

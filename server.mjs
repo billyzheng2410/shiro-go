@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { KataGoEngine, EngineError, validateState } from './katago.mjs';
 import { SetupManager } from './setup-manager.mjs';
+import { atomicWriteJson } from './scripts/setup-core.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
@@ -71,8 +72,51 @@ async function readJson(request) {
   catch { throw new EngineError('请求必须是有效的 JSON。', 400); }
 }
 
+function desktopStorage(dataRoot) {
+  const filename = resolve(dataRoot, 'desktop-save.json');
+  let writes = Promise.resolve();
+  async function read() {
+    try {
+      return JSON.parse(await readFile(filename, 'utf8'));
+    } catch (error) {
+      if (error.code === 'ENOENT') return {};
+      throw error;
+    }
+  }
+  return {
+    async load() {
+      await writes;
+      return read();
+    },
+    save(changes) {
+      if (!changes || typeof changes !== 'object' || Array.isArray(changes)) {
+        throw new EngineError('Invalid desktop save.', 400);
+      }
+      const { game, language, migrate = false } = changes;
+      if (typeof migrate !== 'boolean' ||
+          (language !== undefined && !['zh', 'en'].includes(language)) ||
+          (game !== undefined && (!game || ![9, 13, 19].includes(game.size) ||
+            !Number.isFinite(game.komi) || !Array.isArray(game.moves) ||
+            game.moves.length > 2000 || game.moves.some(index =>
+              !Number.isInteger(index) || index < -1 || index >= game.size ** 2)))) {
+        throw new EngineError('Invalid desktop save.', 400);
+      }
+      const result = writes.then(async () => {
+        const saved = await read();
+        if (game !== undefined && (!migrate || saved.game === undefined)) saved.game = game;
+        if (language !== undefined && (!migrate || saved.language === undefined)) saved.language = language;
+        await atomicWriteJson(filename, saved);
+        return saved;
+      });
+      writes = result.catch(() => {});
+      return result;
+    },
+  };
+}
+
 export function createServer(options = {}) {
   const dataRoot = resolve(options.dataRoot ?? process.env.SHIRO_DATA_DIR ?? ROOT);
+  const storage = options.desktop ? desktopStorage(dataRoot) : null;
   let engine = options.engine ?? new KataGoEngine({ root: dataRoot });
   const setup = options.setup ?? new SetupManager({ appRoot: ROOT, dataRoot, desktop: Boolean(options.desktop),
     beforeStart: () => {
@@ -106,6 +150,17 @@ export function createServer(options = {}) {
       if (url.pathname === '/api/setup/start' && request.method === 'POST') {
         if (!(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new EngineError('Use application/json for installation.', 415);
         sendJson(response, 202, await setup.start(await readJson(request))); return;
+      }
+      if (url.pathname === '/api/desktop/save' && storage) {
+        if (request.method === 'GET') {
+          sendJson(response, 200, await storage.load()); return;
+        }
+        if (request.method === 'POST') {
+          if (!(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+            throw new EngineError('Use application/json.', 415);
+          }
+          sendJson(response, 200, await storage.save(await readJson(request))); return;
+        }
       }
       if (url.pathname === '/api/desktop/quit' && request.method === 'POST' && options.desktop) {
         if (!(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new EngineError('Use application/json.', 415);

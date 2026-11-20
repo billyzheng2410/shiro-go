@@ -7,6 +7,14 @@ export const EMPTY = 0;
 export const BLACK = 1;
 export const WHITE = 2;
 
+/** The receiver rebuilds captures, passes and superko history from the moves. */
+export function serializePosition({ size, komi, board, toPlay, moves, over }) {
+  return {
+    size, komi, board, toPlay, over,
+    moves: moves.map(({ index, player }) => ({ index, player })),
+  };
+}
+
 const neighborCache = new Map();
 
 function neighborsFor(size) {

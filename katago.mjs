@@ -164,6 +164,7 @@ export class KataGoEngine {
     this.humanModelLoaded = false;
     this.child = null;
     this.pending = new Map();
+    this.activeSearch = null;
     this.counter = 0;
     this.logs = '';
     this.lastError = '';
@@ -326,6 +327,10 @@ export class KataGoEngine {
     pending.cleanup?.();
     this.pending.delete(id);
     if (error) pending.reject(error); else pending.resolve(result);
+    if (this.activeSearch === id) {
+      this.activeSearch = null;
+      this.dispatchNextSearch();
+    }
   }
 
   fail(error) {
@@ -341,12 +346,35 @@ export class KataGoEngine {
 
   cancel(id) {
     if (!this.pending.has(id)) return;
-    try {
-      this.child?.stdin?.write(JSON.stringify({ id: `cancel-${++this.counter}`, action: 'terminate', terminateId: id }) + '\n');
-    } catch { /* The original request still needs its cancellation result. */ }
+    this.terminateSearch(id);
     const error = new EngineError('分析已取消。', 499);
     error.name = 'AbortError';
     this.finish(id, error);
+  }
+
+  terminateSearch(id) {
+    if (this.activeSearch !== id) return;
+    try {
+      this.child?.stdin?.write(JSON.stringify({ id: `cancel-${++this.counter}`, action: 'terminate', terminateId: id }) + '\n');
+    } catch { /* The original request still needs its cancellation result. */ }
+  }
+
+  dispatchNextSearch() {
+    if (this.activeSearch || !this.child || !this.pending.size) return;
+    const [id, pending] = this.pending.entries().next().value;
+    this.activeSearch = id;
+    const timeout = this.ready ? pending.searchTimeoutMs : this.startupTimeoutMs;
+    pending.timer = setTimeout(() => {
+      const error = new EngineError('KataGo 启动或计算超时。首次启动可能需要调优；请检查引擎日志或重试。');
+      if (!this.ready) this.fail(error);
+      else {
+        this.terminateSearch(id);
+        this.finish(id, error);
+      }
+    }, timeout);
+    this.child.stdin.write(JSON.stringify(pending.query) + '\n', error => {
+      if (error) this.finish(id, new EngineError(`无法发送分析请求：${error.message}`));
+    });
   }
 
   async score(state, level = 'deep', timeLimit, { signal } = {}) {
@@ -376,14 +404,18 @@ export class KataGoEngine {
     }
     if (this.pending.size >= 2) throw new EngineError('KataGo 正在计算，请稍后再试。', 429);
     this.start(Boolean(selection.effective.profile));
-    const timeout = this.ready ? (timeLimit ?? SEARCH_BUDGETS[level].seconds) * 1000 + 30000 : this.startupTimeoutMs;
+    const searchTimeoutMs = query.overrideSettings.maxTime * 1000 + 30000;
+    const position = replayState(state);
     return new Promise((resolvePromise, reject) => {
-      const timer = setTimeout(() => this.fail(new EngineError('KataGo 启动或计算超时。首次启动可能需要调优；请检查引擎日志或重试。')), timeout);
       const onAbort = () => this.cancel(id);
-      this.pending.set(id, { resolve: resolvePromise, reject, timer, size: state.size, player: state.toPlay, state: replayState(state), selection, started: performance.now(), cleanup: () => options.signal?.removeEventListener('abort', onAbort) });
+      this.pending.set(id, {
+        resolve: resolvePromise, reject, query, searchTimeoutMs,
+        size: position.size, player: position.toPlay, state: position, selection,
+        started: performance.now(), cleanup: () => options.signal?.removeEventListener('abort', onAbort),
+      });
       options.signal?.addEventListener('abort', onAbort, { once: true });
       if (options.signal?.aborted) { this.cancel(id); return; }
-      this.child.stdin.write(JSON.stringify(query) + '\n', error => { if (error) this.finish(id, new EngineError(`无法发送分析请求：${error.message}`)); });
+      this.dispatchNextSearch();
     });
   }
 

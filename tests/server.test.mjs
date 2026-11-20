@@ -24,14 +24,14 @@ function mockEngine(overrides = {}) {
   };
 }
 
-async function fixture(t, engine = mockEngine()) {
+async function fixture(t, engine = mockEngine(), options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'shiro-server-'));
   const publicRoot = join(root, 'public');
   mkdirSync(publicRoot);
   writeFileSync(join(publicRoot, 'index.html'), '<!doctype html><title>Local Go</title>');
   writeFileSync(join(publicRoot, 'app.js'), 'export const local = true;');
   writeFileSync(join(root, 'private.txt'), 'PRIVATE_DO_NOT_SERVE');
-  const { server } = createServer({ engine, port: 0, staticRoot: publicRoot });
+  const { server } = createServer({ engine, port: 0, staticRoot: publicRoot, ...options });
   t.after(async () => {
     server.closeAllConnections();
     await new Promise(resolveClose => server.close(resolveClose));
@@ -42,6 +42,24 @@ async function fixture(t, engine = mockEngine()) {
   assert.equal(address.address, '127.0.0.1');
   return { root, publicRoot, server, port: address.port };
 }
+
+test('desktop saves migrate once and keep the game and language across different ports', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'shiro-server-'));
+  t.after(() => removeOwnedFixture(root));
+  const game = { schema: 2, size: 9, komi: 7.5, moves: [40, 20, -1] };
+  const first = await fixture(t, mockEngine(), { desktop: true, dataRoot: root });
+  const write = (port, changes) => request(port, '/api/desktop/save', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changes),
+  });
+  assert.equal((await write(first.port, { game, language: 'zh', migrate: true })).status, 200);
+  assert.equal((await write(first.port, { game: { ...game, moves: [] }, language: 'en', migrate: true })).status, 200);
+  const second = await fixture(t, mockEngine(), { desktop: true, dataRoot: root });
+  assert.notEqual(first.port, second.port);
+  assert.deepEqual(JSON.parse((await request(second.port, '/api/desktop/save')).body), { game, language: 'zh' });
+  assert.equal((await write(second.port, { language: 'en' })).status, 200);
+  assert.equal((await write(second.port, { game: { ...game, moves: [81] } })).status, 400);
+  assert.deepEqual(JSON.parse((await request(second.port, '/api/desktop/save')).body), { game, language: 'en' });
+});
 
 function request(port, path, { method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolveResponse, reject) => {

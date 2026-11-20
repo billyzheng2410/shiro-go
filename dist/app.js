@@ -1,4 +1,4 @@
-import { createGame, playMove, BLACK, WHITE } from './engine.js';
+import { createGame, playMove, serializePosition, BLACK, WHITE } from './engine.js';
 import { initLanguage, getLanguage, translateText } from './i18n.js';
 import { initSetupUI } from './first-run.js';
 import { showScore } from './score-ui.js';
@@ -9,6 +9,7 @@ const letters = 'ABCDEFGHJKLMNOPQRST';
 const canvas = $('board');
 const ctx = canvas.getContext('2d');
 const STORAGE_KEY = 'shiro-go-v1';
+const LANGUAGE_KEY = 'shiro-go-language';
 let state = createGame(19, 7.5);
 let human = BLACK;
 let mode = 'play';
@@ -27,7 +28,9 @@ let newSize = 19;
 let newColor = BLACK;
 let toastTimer;
 let autoScorePending = false;
-const setupUI = initSetupUI(getStatus, toast);
+let desktop = false;
+let desktopWrites = Promise.resolve();
+const setupUI = initSetupUI(getStatus, toast, () => desktopWrites);
 
 function rankLabel(id = opponentRank) { return getRank(id)?.label || '最强 · 不限段位'; }
 
@@ -59,20 +62,50 @@ function toast(message) {
   toastTimer = setTimeout(() => $('toast').classList.remove('show'), 4500);
 }
 
-function save() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ schema: 2, size: state.size, komi: state.komi, moves: state.moves.map(({ index }) => index), human, mode, opponentRank, level: $('strength').value, resigned, evaluations: evaluations.slice(-120) }));
-  } catch { /* Gameplay remains available when browser storage is disabled. */ }
+function retainedEvaluations(entries, moveCount) {
+  if (!Array.isArray(entries)) return [];
+  return entries.filter(entry => entry && Number.isFinite(entry.blackWinrate) &&
+    Number.isInteger(entry.ply) && entry.ply <= moveCount && entry.result).slice(-120)
+    .map(({ ply, blackWinrate, result }) => {
+      const { player, winrate, scoreLead, visits, index, pv } = result;
+      return { ply, blackWinrate, result: {
+        player, winrate, scoreLead, visits, index,
+        pv: Array.isArray(pv) ? pv.filter(move => typeof move === 'string' && move.length <= 4).slice(0, 7) : [],
+      } };
+    });
 }
 
-function restore() {
+async function desktopSave(changes) {
+  const response = await fetch('/api/desktop/save', changes ? {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(changes), keepalive: true,
+  } : {});
+  if (!response.ok) throw new Error(changes ? '本机存档写入失败。' : '无法读取本机存档。');
+  return response.json();
+}
+
+function persistDesktop(changes) {
+  if (desktop) desktopWrites = desktopWrites.then(() => desktopSave(changes))
+    .catch(() => toast('本机存档写入失败。'));
+}
+
+function save() {
+  const game = {
+    schema: 2, size: state.size, komi: state.komi, moves: state.moves.map(({ index }) => index),
+    human, mode, opponentRank, level: $('strength').value, resigned,
+    evaluations: retainedEvaluations(evaluations, state.moves.length),
+  };
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(game)); } catch { /* Storage may be disabled. */ }
+  persistDesktop({ game });
+}
+
+function restore(saved) {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (!saved || ![9, 13, 19].includes(saved.size) || !Number.isFinite(saved.komi) || !Array.isArray(saved.moves) || saved.moves.length > 2000) return;
+    if (!saved || ![9, 13, 19].includes(saved.size) || !Number.isFinite(saved.komi) || !Array.isArray(saved.moves) || saved.moves.length > 2000) return false;
     let restored = createGame(saved.size, saved.komi);
     for (const index of saved.moves) {
       const result = playMove(restored, index);
-      if (!result.ok) return;
+      if (!result.ok) return false;
       restored = result.state;
     }
     state = restored;
@@ -81,9 +114,40 @@ function restore() {
     resigned = !!saved.resigned;
     if (saved.schema >= 2 && ['fast', 'balanced', 'deep', 'max', 'extended'].includes(saved.level)) $('strength').value = saved.level;
     opponentRank = getRank(saved.opponentRank)?.id || DEFAULT_RANK;
-    evaluations = Array.isArray(saved.evaluations) ? saved.evaluations.filter(e => Number.isFinite(e.blackWinrate) && Number.isInteger(e.ply) && e.ply <= state.moves.length) : [];
+    evaluations = retainedEvaluations(saved.evaluations, state.moves.length);
     evaluation = evaluations.findLast(e => e.ply === state.moves.length)?.result ?? null;
-  } catch { /* Ignore an outdated or incomplete saved game. */ }
+    return true;
+  } catch { return false; }
+}
+
+async function loadSavedSession() {
+  let browserGame;
+  let browserLanguage;
+  try {
+    browserLanguage = localStorage.getItem(LANGUAGE_KEY);
+    browserGame = JSON.parse(localStorage.getItem(STORAGE_KEY));
+  } catch { /* A blocked or outdated browser save does not prevent startup. */ }
+  if (!desktop) {
+    restore(browserGame);
+    return browserLanguage;
+  }
+  try {
+    let saved = await desktopSave();
+    const migration = {};
+    if (saved.game === undefined && restore(browserGame)) {
+      migration.game = { ...browserGame, evaluations };
+    }
+    if (saved.language === undefined && ['zh', 'en'].includes(browserLanguage)) {
+      migration.language = browserLanguage;
+    }
+    if (Object.keys(migration).length) saved = await desktopSave({ ...migration, migrate: true });
+    restore(saved.game);
+    return saved.language;
+  } catch {
+    restore(browserGame);
+    toast('无法读取本机存档。');
+    return browserLanguage;
+  }
 }
 
 function canPlay() { return !busy && !state.over && !resigned && (mode === 'analysis' || state.toPlay === human); }
@@ -288,7 +352,7 @@ async function requestAI(play = false) {
   try {
     const response = await fetch('/api/analyze', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: requestController.signal,
-      body: JSON.stringify({ state: { size: state.size, komi: state.komi, board: state.board, toPlay: state.toPlay, moves: state.moves, over: state.over }, level: $('strength').value, rank: opponentRank, purpose: play ? 'play' : 'analyze' }),
+      body: JSON.stringify({ state: serializePosition(state), level: $('strength').value, rank: opponentRank, purpose: play ? 'play' : 'analyze' }),
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'KataGo 分析失败，请重试。');
@@ -372,14 +436,19 @@ async function requestScore() {
   try {
     const response = await fetch('/api/score', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: requestController.signal,
-      body: JSON.stringify({ state, level: $('strength').value }),
+      body: JSON.stringify({ state: serializePosition(state), level: $('strength').value }),
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'AI 数子失败，请重试。');
     if (generation !== token) return;
     if (!result.scoring || !Array.isArray(result.scoring.suggestedDead)) throw new Error('Invalid scoring response.');
     showScore(state, result);
-  } catch (error) { if (error.name !== 'AbortError' && generation === token) toast(error.message); }
+  } catch (error) {
+    if (error.name !== 'AbortError' && generation === token) {
+      toast(error.message);
+      showScore(state);
+    }
+  }
   finally { if (generation === token) { busy = false; render(); } }
 }
 
@@ -419,6 +488,12 @@ function pointAt(event) {
   const col = Math.round((event.clientX - box.left - margin) / step);
   return row < 0 || row >= state.size || col < 0 || col >= state.size ? -1 : row * state.size + col;
 }
+
+await getStatus();
+desktop = engineStatus?.desktop === true;
+const initialLanguage = await loadSavedSession();
+initLanguage({ initialLanguage, onChange: language => persistDesktop({ language }) });
+render();
 
 canvas.addEventListener('pointermove', event => { const point = pointAt(event); if (point !== hover) { hover = point; renderBoard(); } });
 canvas.addEventListener('pointerleave', () => { hover = -1; renderBoard(); });
@@ -499,8 +574,5 @@ $('new-form').addEventListener('submit', event => {
   $('new-dialog').close(); save(); render(); requestAI(true);
 });
 
-restore(); render();
-initLanguage();
-await getStatus();
 if (mode === 'play' && state.toPlay !== human && !state.over && !resigned) requestAI(true);
 setInterval(() => { if (busy || engineStatus?.starting) getStatus(); }, 4000);

@@ -135,12 +135,14 @@ test('AbortSignal terminates only its own query and leaves the warm engine and o
   const controller = new AbortController();
   const first = engine.analyze(createGame(9), 'max', undefined, { signal: controller.signal });
   const second = engine.analyze(createGame(9), 'max');
-  const firstId = writes[0].id, secondId = writes[1].id;
+  const firstId = writes[0].id;
+  assert.equal(writes.length, 1, 'the second search waits in the application queue');
   const rejection = assert.rejects(first, error => error.name === 'AbortError');
   controller.abort();
   await rejection;
-  assert.equal(writes[2].action, 'terminate');
-  assert.equal(writes[2].terminateId, firstId);
+  assert.equal(writes[1].action, 'terminate');
+  assert.equal(writes[1].terminateId, firstId);
+  const secondId = writes[2].id;
   assert.equal(engine.pending.has(firstId), false);
   assert.equal(engine.pending.has(secondId), true);
   assert.equal(wasKilled(), false);
@@ -151,6 +153,31 @@ test('AbortSignal terminates only its own query and leaves the warm engine and o
   assert.equal(engine.pending.size, 0);
   assert.equal(wasKilled(), false);
   engine.close();
+});
+
+test('a short queued search only starts its clock on dispatch and times out independently', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { engine, writes, wasKilled } = fakeEngine();
+  engine.ready = true;
+  t.after(() => engine.close());
+  const long = engine.analyze(createGame(9), 'extended');
+  const short = engine.analyze(createGame(9), 'fast', 0.1);
+  const firstId = writes[0].id;
+  assert.equal(writes.length, 1);
+  t.mock.timers.tick(45_000);
+  assert.equal(engine.pending.size, 2);
+  assert.equal(wasKilled(), false);
+  engine.receiveLine(JSON.stringify(finalResult(firstId)));
+  await long;
+  const secondId = writes[1].id;
+  const rejection = assert.rejects(short, /超时/);
+  t.mock.timers.tick(30_101);
+  await rejection;
+  assert.equal(writes[2].terminateId, secondId);
+  assert.equal(wasKilled(), false);
+  const next = engine.analyze(createGame(9), 'fast');
+  engine.receiveLine(JSON.stringify(finalResult(writes[3].id)));
+  assert.equal((await next).selectionMethod, 'search');
 });
 
 test('an already-aborted request never starts an engine process', async () => {
